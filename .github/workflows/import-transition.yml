@@ -1,0 +1,52 @@
+name: Import desktop transition 3.4.3
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/import-transition.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  import:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Import published binaries only
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $desktopVersion = '3.4.3'
+          $desktopTag = "v$desktopVersion"
+          gh release view $desktopTag --repo "$env:GITHUB_REPOSITORY" *> $null
+          if ($LASTEXITCODE -eq 0) { Write-Host 'Transition release already exists.'; exit 0 }
+          $desktopBase = "https://github.com/Maynee94/nongdanair/releases/download/$desktopTag"
+          New-Item -ItemType Directory release-files | Out-Null
+          $desktopReady = $false
+          for ($desktopAttempt = 0; $desktopAttempt -lt 60; $desktopAttempt++) {
+            try {
+              Invoke-WebRequest "$desktopBase/latest.yml" -OutFile release-files/latest.yml -TimeoutSec 30
+              $desktopReady = $true
+              break
+            } catch { Write-Host 'Waiting for the tested transition release…'; Start-Sleep -Seconds 15 }
+          }
+          if (!$desktopReady) { throw 'Transition release is not yet published in the source repo. Re-run this workflow after the source build succeeds.' }
+          $desktopMeta = Get-Content release-files/latest.yml -Raw
+          if ($desktopMeta -notmatch '(?m)^version:\s*3\.4\.3\s*$') { throw 'Wrong transition version' }
+          $desktopNames = @("NDAN-Creator-$desktopVersion-x64-Setup.exe", "NDAN-Creator-$desktopVersion-x64-Portable.exe", "NDAN-Creator-$desktopVersion-x64-Setup.exe.blockmap")
+          foreach ($desktopName in $desktopNames) { Invoke-WebRequest "$desktopBase/$desktopName" -OutFile "release-files/$desktopName" -TimeoutSec 180 }
+          if ($desktopMeta -notmatch '(?m)^sha512:\s*(\S+)') { throw 'Missing installer checksum' }
+          $desktopExpected = $Matches[1]
+          $desktopActual = [Convert]::ToBase64String([Convert]::FromHexString((Get-FileHash "release-files/NDAN-Creator-$desktopVersion-x64-Setup.exe" -Algorithm SHA512).Hash))
+          if ($desktopActual -ne $desktopExpected) { throw 'Installer checksum mismatch' }
+          gh release view $desktopTag --repo "$env:GITHUB_REPOSITORY" *> $null
+          if ($LASTEXITCODE -eq 0) { Write-Host 'Distribution publisher already created this release.'; exit 0 }
+          $desktopAssets = (Get-ChildItem release-files -File).FullName
+          'Transition 3.4.3: in-app updates now use Maynee94/ndan-desktop-updates. Download Setup.exe for updates, Portable.exe for standalone use. This repository contains distribution files, not the source project.' | Set-Content desktop-release-notes.txt -Encoding utf8
+          gh release create $desktopTag $desktopAssets --repo "$env:GITHUB_REPOSITORY" --target main --title "NDAN Creator Desktop $desktopVersion" --notes-file desktop-release-notes.txt --latest
+          if ($LASTEXITCODE -ne 0) {
+            gh release view $desktopTag --repo "$env:GITHUB_REPOSITORY" *> $null
+            if ($LASTEXITCODE -ne 0) { throw 'Transition publication failed' }
+          }
